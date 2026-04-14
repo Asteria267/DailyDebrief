@@ -1,5 +1,3 @@
-Python 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)] on win32
-Type "help", "copyright", "credits" or "license()" for more information.
 """
 ================================================================================
   DailyDebrief — Day 13  ✈️
@@ -261,75 +259,45 @@ def collect_shell(since_dt: datetime) -> dict:
 
 def collect_files(since_dt: datetime) -> dict:
     """
-    Optimized file scanner:
-    - limits depth
-    - skips heavy directories early
-    - avoids unnecessary stat calls
+    Walk common directories for recently modified files.
+    Detects "hot files" — modified multiple times (= active iteration).
+    Groups by extension.
     """
-
     result = {
         "total_modified": 0,
-        "files": [],
-        "hot_files": [],
+        "files": [],          # [{path, mtime, ext}]
+        "hot_files": [],      # modified 2+ times (same name, different mtimes)
         "by_extension": {},
     }
 
-    since_ts = since_dt.timestamp()
-
-    search_dirs = [
-        Path.cwd(),
-        Path.home() / "Desktop",
-        Path.home() / "Documents"
-    ]
-
-    SKIP_DIRS = {"node_modules", "__pycache__", ".git", "venv", ".venv", "env"}
-
+    search_dirs = [Path.cwd(), Path.home() / "Desktop",
+                   Path.home() / "Documents", Path.home()]
+    seen = set()
     all_files = []
+    since_ts = since_dt.timestamp()
 
     for base in search_dirs:
         if not base.exists():
             continue
-
-        for root, dirs, files in os.walk(base):
-            root_path = Path(root)
-
-            # 🚀 prune heavy directories EARLY (BIG performance win)
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
-
-            # 🚀 limit depth (prevents explosion)
-            try:
-                if len(root_path.relative_to(base).parts) > 4:
-                    dirs.clear()
+        try:
+            for p in base.rglob("*"):
+                if p in seen or not p.is_file():
                     continue
-            except:
-                continue
-
-            for fname in files:
-                fpath = root_path / fname
-
+                # skip hidden dirs, node_modules, .git, __pycache__
+                parts = p.parts
+                if any(part.startswith(".") or part in
+                       {"node_modules", "__pycache__", "venv", ".venv", "env"}
+                       for part in parts):
+                    continue
                 try:
-                    stat = fpath.stat()
+                    mtime = p.stat().st_mtime
                 except (PermissionError, OSError):
                     continue
-
-                if stat.st_mtime >= since_ts:
-                    ext = fpath.suffix or "no ext"
-
-                    result["by_extension"][ext] = result["by_extension"].get(ext, 0) + 1
-
-                    all_files.append({
-                        "path": str(fpath),
-                        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%H:%M"),
-                        "ext": ext
-                    })
-
-    # sort once (efficient)
-    all_files.sort(key=lambda x: x["mtime"], reverse=True)
-
-    result["total_modified"] = len(all_files)
-    result["files"] = all_files[:MAX_FILES]
-
-    return result
+                if mtime >= since_ts:
+                    seen.add(p)
+                    all_files.append({"path": p, "mtime": mtime, "ext": p.suffix})
+        except (PermissionError, OSError):
+            continue
 
     all_files.sort(key=lambda x: -x["mtime"])
     result["total_modified"] = len(all_files)
@@ -758,41 +726,42 @@ def main():
         shell = collect_shell(since_dt)
     console.print(f"  [green]✓[/green] shell     — "
                   f"{shell.get('total_commands', 0)} commands  "
-...                   f"frustration: {shell.get('frustration_score','N/A')}")
-... 
-...     with console.status("[dim]file modifications…[/dim]"):
-...         files = collect_files(since_dt)
-...     console.print(f"  [green]✓[/green] files     — "
-...                   f"{files['total_modified']} modified")
-... 
-...     system = collect_system()
-...     if system.get("found"):
-...         console.print(f"  [green]✓[/green] system    — "
-...                       f"mem {system['memory_pct']}%  uptime {system['uptime_hours']}h")
-... 
-...     if args.no_llm:
-...         render_raw(git, shell, files, system, args.since)
-...         return
-... 
-...     # ── LLM ───────────────────────────────────────────────────────────────────
-...     context = compress_for_llm(git, shell, files, system, args.since)
-...     console.print(f"\n  [dim]Sending to {args.model}…[/dim]")
-...     t0      = time.time()
-... 
-...     with console.status(f"[dim]{args.model} is thinking…[/dim]"):
-...         debrief = run_debrief(args.model, context)
-... 
-...     elapsed = time.time() - t0
-... 
-...     # ── save & streak ─────────────────────────────────────────────────────────
-...     saved_path = None
-...     if debrief:
-...         saved_path = save_debrief(debrief, git, shell, files)
-...     streak = load_streak()
-... 
-...     # ── render ────────────────────────────────────────────────────────────────
-...     render(debrief, git, shell, files, system,
-...            args.since, saved_path, streak, args.model, elapsed)
-... 
-... 
-... if __name__ == "__main__":
+                  f"frustration: {shell.get('frustration_score','N/A')}")
+
+    with console.status("[dim]file modifications…[/dim]"):
+        files = collect_files(since_dt)
+    console.print(f"  [green]✓[/green] files     — "
+                  f"{files['total_modified']} modified")
+
+    system = collect_system()
+    if system.get("found"):
+        console.print(f"  [green]✓[/green] system    — "
+                      f"mem {system['memory_pct']}%  uptime {system['uptime_hours']}h")
+
+    if args.no_llm:
+        render_raw(git, shell, files, system, args.since)
+        return
+
+    # ── LLM ───────────────────────────────────────────────────────────────────
+    context = compress_for_llm(git, shell, files, system, args.since)
+    console.print(f"\n  [dim]Sending to {args.model}…[/dim]")
+    t0      = time.time()
+
+    with console.status(f"[dim]{args.model} is thinking…[/dim]"):
+        debrief = run_debrief(args.model, context)
+
+    elapsed = time.time() - t0
+
+    # ── save & streak ─────────────────────────────────────────────────────────
+    saved_path = None
+    if debrief:
+        saved_path = save_debrief(debrief, git, shell, files)
+    streak = load_streak()
+
+    # ── render ────────────────────────────────────────────────────────────────
+    render(debrief, git, shell, files, system,
+           args.since, saved_path, streak, args.model, elapsed)
+
+
+if __name__ == "__main__":
+    main()
