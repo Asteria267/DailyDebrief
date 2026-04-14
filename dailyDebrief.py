@@ -261,45 +261,75 @@ def collect_shell(since_dt: datetime) -> dict:
 
 def collect_files(since_dt: datetime) -> dict:
     """
-    Walk common directories for recently modified files.
-    Detects "hot files" — modified multiple times (= active iteration).
-    Groups by extension.
+    Optimized file scanner (NO LAG):
+    - limits depth
+    - skips heavy directories early
+    - avoids unnecessary stat calls
     """
+
     result = {
         "total_modified": 0,
-        "files": [],          # [{path, mtime, ext}]
-        "hot_files": [],      # modified 2+ times (same name, different mtimes)
+        "files": [],
+        "hot_files": [],
         "by_extension": {},
     }
 
-    search_dirs = [Path.cwd(), Path.home() / "Desktop",
-                   Path.home() / "Documents", Path.home()]
-    seen = set()
-    all_files = []
     since_ts = since_dt.timestamp()
+
+    search_dirs = [
+        Path.cwd(),
+        Path.home() / "Desktop",
+        Path.home() / "Documents"
+    ]
+
+    SKIP_DIRS = {"node_modules", "__pycache__", ".git", "venv", ".venv", "env"}
+
+    all_files = []
 
     for base in search_dirs:
         if not base.exists():
             continue
-        try:
-            for p in base.rglob("*"):
-                if p in seen or not p.is_file():
+
+        for root, dirs, files in os.walk(base):
+            root_path = Path(root)
+
+            # 🚀 prune heavy directories EARLY (BIG performance win)
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+
+            # 🚀 limit depth (prevents explosion)
+            try:
+                if len(root_path.relative_to(base).parts) > 4:
+                    dirs.clear()
                     continue
-                # skip hidden dirs, node_modules, .git, __pycache__
-                parts = p.parts
-                if any(part.startswith(".") or part in
-                       {"node_modules", "__pycache__", "venv", ".venv", "env"}
-                       for part in parts):
-                    continue
+            except:
+                continue
+
+            for fname in files:
+                fpath = root_path / fname
+
                 try:
-                    mtime = p.stat().st_mtime
+                    stat = fpath.stat()
                 except (PermissionError, OSError):
                     continue
-                if mtime >= since_ts:
-                    seen.add(p)
-                    all_files.append({"path": p, "mtime": mtime, "ext": p.suffix})
-        except (PermissionError, OSError):
-            continue
+
+                if stat.st_mtime >= since_ts:
+                    ext = fpath.suffix or "no ext"
+
+                    result["by_extension"][ext] = result["by_extension"].get(ext, 0) + 1
+
+                    all_files.append({
+                        "path": str(fpath),
+                        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%H:%M"),
+                        "ext": ext
+                    })
+
+    # sort once (efficient)
+    all_files.sort(key=lambda x: x["mtime"], reverse=True)
+
+    result["total_modified"] = len(all_files)
+    result["files"] = all_files[:MAX_FILES]
+
+    return result
 
     all_files.sort(key=lambda x: -x["mtime"])
     result["total_modified"] = len(all_files)
