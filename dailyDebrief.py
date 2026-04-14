@@ -261,7 +261,7 @@ def collect_shell(since_dt: datetime) -> dict:
 
 def collect_files(since_dt: datetime) -> dict:
     """
-    Optimized file scanner (NO LAG):
+    Optimized file scanner:
     - limits depth
     - skips heavy directories early
     - avoids unnecessary stat calls
